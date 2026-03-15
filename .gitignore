@@ -37,3 +37,11 @@ results/*.json
 *.tsbuildinfo
 
 # Package lock (optional, keep package-lock if you want reproducible builds)
+disagg-bench/cluster/run_demo_distill.py
+disagg-bench/cluster/demo_distill_results.json
+disagg-bench/cluster/.venv/
+docs/FULL-CODE-REVIEW.md
+docs/JUDGE-CRITIQUE.md
+docs/WHAT-YOURE-PUSHING-AND-DEMO.md
+disagg-bench/ui/app/api/leads/
+disagg-bench/ui/components/leads-dashboard.tsx

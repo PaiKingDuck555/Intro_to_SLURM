@@ -12,6 +12,7 @@ import { ParetoChart } from "@/components/pareto-chart";
 import { FineTunePlanner } from "@/components/finetune-planner";
 import { BenchmarkModal } from "@/components/benchmark-modal";
 import { DistillationPlanner } from "@/components/distillation-planner";
+import { LeadsDashboard } from "@/components/leads-dashboard";
 
 const models = getModelList();
 
@@ -189,6 +190,34 @@ export default function Home() {
         {/* Fine-Tuning Planner */}
         <section className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
           <FineTunePlanner models={models} />
+        </section>
+
+        {/* Divider */}
+        <div className="relative">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-zinc-800" />
+          </div>
+          <div className="relative flex justify-center">
+            <span className="bg-[var(--bg)] px-4 text-sm text-zinc-500">
+              Lead Generation
+            </span>
+          </div>
+        </div>
+
+        {/* Lead Generation Agent */}
+        <section className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
+          <div className="flex items-center gap-3 mb-5">
+            <span className="flex items-center justify-center w-7 h-7 rounded-full bg-purple-500/20 text-purple-400 text-sm font-bold">
+              ✦
+            </span>
+            <div>
+              <h2 className="text-lg font-semibold">Autonomous Lead Generation</h2>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Claude agent · LeadHunter · Researcher · OutreachWriter
+              </p>
+            </div>
+          </div>
+          <LeadsDashboard />
         </section>
 
         {/* Footer */}

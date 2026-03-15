@@ -1,10 +1,12 @@
 /**
  * Distillation cost and accuracy modeling.
  *
- * Uses log-linear scaling from KD literature:
+ * Accuracy retention uses a log-linear heuristic:
  *   retention = 1 - k * ln(teacher_params / student_params)
- * where k ≈ 0.08 fits DistilBERT (2x compression → ~97% retention)
- * and TinyBERT (7x compression → ~93% retention).
+ *
+ * k = 0.08 is a rough empirical constant. Real retention is highly
+ * task-dependent — these are planning estimates only. Run the pipeline
+ * and measure perplexity on your eval set for actual numbers.
  */
 
 const DISTILL_K = 0.08;
