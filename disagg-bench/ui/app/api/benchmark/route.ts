@@ -134,6 +134,14 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
+    const isConnErr = msg.includes("ECONNREFUSED") || msg.includes("Connection refused") ||
+      msg.includes("ssh") || msg.includes("timeout") || msg.includes("Permission denied");
+    if (isConnErr) {
+      return NextResponse.json(
+        { error: "Cluster unavailable — benchmark execution requires a connected FluidStack GPU node. All benchmark data shown in the UI was collected on NVIDIA B200 via SLURM." },
+        { status: 503 }
+      );
+    }
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

@@ -32,10 +32,11 @@ nvidia-smi
 
 mkdir -p logs results
 
-python3 ~/monte_carlo_pi_gpu.py \
+# Run from repo root: cd Intro_to_SLURM && sbatch submit_pi_gpu.slurm
+python3 monte_carlo_pi_gpu.py \
     --total-darts $TOTAL_DARTS \
     --chunked \
     --skip-cpu \
-    --output-dir ~/results
+    --output-dir results
 
 echo "Finished: $(date)"
