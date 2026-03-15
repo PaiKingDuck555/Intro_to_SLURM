@@ -99,7 +99,7 @@ export function ConstraintsPanel({ constraints, onChange }: Props) {
       </div>
 
       {/* Constraints */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <NumberInput
           label="Max Latency (first token)"
           value={constraints.maxLatencyMs}
@@ -124,6 +124,13 @@ export function ConstraintsPanel({ constraints, onChange }: Props) {
           label="Avg Prompt Length"
           value={constraints.avgPromptTokens}
           onChange={(v) => update({ avgPromptTokens: v })}
+          suffix="tokens"
+          min={1}
+        />
+        <NumberInput
+          label="Avg Output Length"
+          value={constraints.avgOutputTokens}
+          onChange={(v) => update({ avgOutputTokens: v })}
           suffix="tokens"
           min={1}
         />

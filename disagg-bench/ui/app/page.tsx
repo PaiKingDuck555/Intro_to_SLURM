@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { getModelList } from "@/lib/benchmark-data";
 import { GPU_LIST } from "@/lib/gpu-catalog";
+import { MODEL_CATALOG } from "@/lib/model-catalog";
 import { optimize, type UserConstraints } from "@/lib/optimizer";
 import { ModelSelector } from "@/components/model-selector";
 import { ConstraintsPanel } from "@/components/constraints-panel";
 import { Recommendation } from "@/components/recommendation";
 import { ParetoChart } from "@/components/pareto-chart";
 import { FineTunePlanner } from "@/components/finetune-planner";
+import { BenchmarkModal } from "@/components/benchmark-modal";
 
 const models = getModelList();
 
@@ -27,14 +29,36 @@ const DEFAULT_CONSTRAINTS: UserConstraints = {
 export default function Home() {
   const [constraints, setConstraints] =
     useState<UserConstraints>(DEFAULT_CONSTRAINTS);
+  const [benchTarget, setBenchTarget] = useState<string | null>(null);
 
   const architectures = useMemo(() => optimize(constraints), [constraints]);
 
   const updateModel = (model: string) =>
     setConstraints((c) => ({ ...c, model }));
 
+  const handleRunBenchmark = useCallback((modelId: string) => {
+    setBenchTarget(modelId);
+  }, []);
+
+  const benchModelName =
+    benchTarget
+      ? MODEL_CATALOG.find((m) => m.id === benchTarget)?.name || benchTarget
+      : "";
+
   return (
     <div className="min-h-screen">
+      {/* Benchmark Modal */}
+      {benchTarget && (
+        <BenchmarkModal
+          modelId={benchTarget}
+          modelName={benchModelName}
+          onClose={() => setBenchTarget(null)}
+          onComplete={() => {
+            setBenchTarget(null);
+          }}
+        />
+      )}
+
       {/* Header */}
       <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
@@ -54,7 +78,7 @@ export default function Home() {
               Benchmarked on NVIDIA B200 &middot; FluidStack Cluster
             </span>
             <a
-              href="https://github.com"
+              href="https://github.com/damodarpai/Intro_to_SLURM"
               target="_blank"
               rel="noreferrer"
               className="px-3 py-1.5 rounded-md border border-zinc-700 hover:border-zinc-500 transition-colors"
@@ -87,11 +111,15 @@ export default function Home() {
               1
             </span>
             <h2 className="text-lg font-semibold">Choose Your Model</h2>
+            <span className="text-xs text-zinc-500 ml-auto">
+              {models.length} benchmarked &middot; {MODEL_CATALOG.length - models.length} available to benchmark
+            </span>
           </div>
           <ModelSelector
             models={models}
             selected={constraints.model}
             onSelect={updateModel}
+            onRunBenchmark={handleRunBenchmark}
           />
         </section>
 
