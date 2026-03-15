@@ -28,4 +28,12 @@ venv/
 # Vercel
 .vercel/
 
+# SLURM / Monte Carlo outputs (run locally or on cluster)
+logs/
+results/*.json
+!results/.gitkeep
+
+# TypeScript build cache (auto-generated, not needed in repo)
+*.tsbuildinfo
+
 # Package lock (optional, keep package-lock if you want reproducible builds)
