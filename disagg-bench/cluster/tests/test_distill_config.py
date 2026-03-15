@@ -75,3 +75,27 @@ def test_cache_path_format():
         num_shards=4,
     )
     assert cfg.cache_path().endswith("shard_0000_of_0004.pt")
+
+
+import torch
+import tempfile
+
+
+def test_shard_cache_file_structure():
+    """Cache file is a dict with required keys; round-trips correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_cache = {
+            "input_ids": torch.randint(0, 1000, (10, 128)),
+            "soft_labels": torch.randn(10, 128, 50272),
+            "temperature": 4.0,
+            "model": "facebook/opt-1.3b",
+            "vocab_size": 50272,
+        }
+        path = f"{tmpdir}/shard_0000_of_0001.pt"
+        torch.save(fake_cache, path)
+        # weights_only=False: cache contains non-tensor Python objects (strings, floats)
+        loaded = torch.load(path, map_location="cpu", weights_only=False)
+        assert "input_ids" in loaded
+        assert "soft_labels" in loaded
+        assert loaded["soft_labels"].shape[0] == 10
+        assert loaded["vocab_size"] == 50272
