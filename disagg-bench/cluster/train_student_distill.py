@@ -114,9 +114,28 @@ def train(args: argparse.Namespace) -> None:
         device_map="cuda:0",
         trust_remote_code=True,
     )
+
+    use_lora = getattr(args, "lora", False)
+    if use_lora:
+        from peft import LoraConfig, get_peft_model, TaskType
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "v_proj"],
+        )
+        model = get_peft_model(model, lora_config)
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"LoRA: {trainable:,} trainable / {total:,} total ({100*trainable/total:.2f}%)")
+
     model.train()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=0.01,
+    )
 
     dataset = CachedLogitDataset(shard_paths)
     loader = DataLoader(
@@ -176,6 +195,7 @@ def train(args: argparse.Namespace) -> None:
 
     summary = {
         "student_model": args.student,
+        "method": "lora" if use_lora else "full",
         "temperature": args.temperature,
         "alpha": args.alpha,
         "epochs": args.epochs,
@@ -197,6 +217,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lora", action="store_true",
+                        help="Use LoRA (rank=16) instead of full fine-tuning")
     args = parser.parse_args()
     train(args)
 

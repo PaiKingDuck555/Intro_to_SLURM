@@ -9,7 +9,7 @@ import { ModelSelector } from "@/components/model-selector";
 import { ConstraintsPanel } from "@/components/constraints-panel";
 import { Recommendation } from "@/components/recommendation";
 import { ParetoChart } from "@/components/pareto-chart";
-import { FineTunePlanner } from "@/components/finetune-planner";
+
 import { BenchmarkModal } from "@/components/benchmark-modal";
 import { DistillationPlanner } from "@/components/distillation-planner";
 
@@ -172,23 +172,6 @@ export default function Home() {
         {/* Distillation Planner */}
         <section className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
           <DistillationPlanner />
-        </section>
-
-        {/* Divider */}
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-zinc-800" />
-          </div>
-          <div className="relative flex justify-center">
-            <span className="bg-[var(--bg)] px-4 text-sm text-zinc-500">
-              Fine-Tuning
-            </span>
-          </div>
-        </div>
-
-        {/* Fine-Tuning Planner */}
-        <section className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
-          <FineTunePlanner models={models} />
         </section>
 
         {/* Footer */}

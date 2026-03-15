@@ -1,17 +1,18 @@
 /**
- * Distillation cost and accuracy modeling.
+ * Distillation cost, accuracy, and ROI modeling.
  *
- * Uses log-linear scaling from KD literature:
+ * Accuracy retention uses log-linear scaling from KD literature:
  *   retention = 1 - k * ln(teacher_params / student_params)
- * where k ≈ 0.08 fits DistilBERT (2x compression → ~97% retention)
- * and TinyBERT (7x compression → ~93% retention).
+ * where k ≈ 0.08 fits DistilBERT and TinyBERT benchmarks.
  */
 
 const DISTILL_K = 0.08;
+const B200_PRICE = 45.0;
+const AVG_TOKENS_PER_SAMPLE = 256;
 
 export interface DistillationInputs {
-  teacherParams: number;       // billions
-  studentParams: number;       // billions
+  teacherParams: number;
+  studentParams: number;
   teacherPricePerHour: number;
   studentPricePerHour: number;
   teacherPrefillTps: number;
@@ -31,12 +32,17 @@ export interface DistillationPlan {
   studentGpusNeeded: number;
   teacherCostPerHour: number;
   studentCostPerHour: number;
+  teacherMonthlyCost: number;
+  studentMonthlyCost: number;
   costSavingsPct: number;
   studentPrefillTps: number;
   studentDecodeTps: number;
-  cacheJobDurationEstimateHrs: number;
-  trainJobDurationEstimateHrs: number;
+  cacheTimeMinutes: number;
+  trainTimeMinutes: number;
+  totalDistillMinutes: number;
   totalDistillCostUsd: number;
+  monthlySavingsUsd: number;
+  roiPaybackMonths: number;
   temperature: number;
   alpha: number;
 }
@@ -60,7 +66,6 @@ export interface CompareInputs extends DistillationInputs {
   teacherInt4DecodeTps: number;
 }
 
-/** Fraction of teacher accuracy retained after distillation. Returns [0, 1]. */
 export function estimateAccuracyRetention(
   teacherParams: number,
   studentParams: number
@@ -72,6 +77,59 @@ export function estimateAccuracyRetention(
 
 function gpusNeeded(decodeTps: number, users: number): number {
   return Math.max(1, Math.ceil(users / decodeTps));
+}
+
+/**
+ * Estimate how long distillation will take (in minutes).
+ * LoRA is ~3x faster than full fine-tuning for the train phase.
+ */
+export function estimateDistillTime(
+  numSamples: number,
+  teacherPrefillTps: number,
+  method: "lora" | "full"
+): { cacheMin: number; trainMin: number; totalMin: number } {
+  const totalTokens = numSamples * AVG_TOKENS_PER_SAMPLE;
+
+  const cacheSeconds = totalTokens / Math.max(teacherPrefillTps, 1);
+  const cacheMin = cacheSeconds / 60;
+
+  const trainTps = method === "lora" ? 1500 : 500;
+  const epochs = 3;
+  const trainSeconds = (totalTokens * epochs) / trainTps;
+  const trainMin = trainSeconds / 60;
+
+  return {
+    cacheMin: Math.round(cacheMin * 10) / 10,
+    trainMin: Math.round(trainMin * 10) / 10,
+    totalMin: Math.round((cacheMin + trainMin) * 10) / 10,
+  };
+}
+
+/**
+ * Estimate Tinker API cost for distillation.
+ * Tinker charges ~$0.09 per forward_backward call.
+ * Each sample needs 1 call per epoch.
+ */
+export function estimateTinkerCost(
+  numSamples: number,
+  epochs: number = 3
+): number {
+  const totalCalls = numSamples * epochs;
+  return Math.round(totalCalls * 0.09 * 100) / 100;
+}
+
+/**
+ * Compute ROI payback period in months.
+ * ROI = one_time_cost / monthly_savings
+ */
+export function computeROI(
+  teacherMonthlyCost: number,
+  studentMonthlyCost: number,
+  oneTimeCost: number
+): number {
+  const monthlySavings = teacherMonthlyCost - studentMonthlyCost;
+  if (monthlySavings <= 0) return Infinity;
+  return oneTimeCost / monthlySavings;
 }
 
 export function estimateDistillationPlan(
@@ -88,22 +146,25 @@ export function estimateDistillationPlan(
 
   const teacherCostPerHour = teacherGpus * inputs.teacherPricePerHour;
   const studentCostPerHour = studentGpus * inputs.studentPricePerHour;
+  const teacherMonthlyCost = teacherCostPerHour * 720;
+  const studentMonthlyCost = studentCostPerHour * 720;
   const costSavingsPct =
     teacherCostPerHour > 0
       ? ((teacherCostPerHour - studentCostPerHour) / teacherCostPerHour) * 100
       : 0;
 
-  // Cache: teacher processes numSamples * ~256 tokens at teacherPrefillTps
-  const avgTok = 256;
-  const cacheS = (inputs.numSamples * avgTok) / Math.max(inputs.teacherPrefillTps, 1);
-  const cacheHrs = cacheS / 3600;
+  const timeEst = estimateDistillTime(
+    inputs.numSamples,
+    inputs.teacherPrefillTps,
+    "lora"
+  );
 
-  // Train: 3 epochs at ~500 tok/s (student FP16 training)
-  const trainS = (inputs.numSamples * avgTok * 3) / 500;
-  const trainHrs = trainS / 3600;
+  const totalDistillCost =
+    (timeEst.cacheMin / 60) * inputs.teacherPricePerHour +
+    (timeEst.trainMin / 60) * inputs.studentPricePerHour;
 
-  const totalCost =
-    cacheHrs * inputs.teacherPricePerHour + trainHrs * inputs.studentPricePerHour;
+  const monthlySavings = teacherMonthlyCost - studentMonthlyCost;
+  const roiPayback = monthlySavings > 0 ? totalDistillCost / monthlySavings : Infinity;
 
   return {
     accuracyRetentionPct: Math.round(retention * 1000) / 10,
@@ -112,12 +173,17 @@ export function estimateDistillationPlan(
     studentGpusNeeded: studentGpus,
     teacherCostPerHour,
     studentCostPerHour,
+    teacherMonthlyCost: Math.round(teacherMonthlyCost),
+    studentMonthlyCost: Math.round(studentMonthlyCost),
     costSavingsPct: Math.round(costSavingsPct * 10) / 10,
     studentPrefillTps: inputs.studentPrefillTps,
     studentDecodeTps: inputs.studentDecodeTps,
-    cacheJobDurationEstimateHrs: Math.round(cacheHrs * 10) / 10,
-    trainJobDurationEstimateHrs: Math.round(trainHrs * 10) / 10,
-    totalDistillCostUsd: Math.round(totalCost * 100) / 100,
+    cacheTimeMinutes: timeEst.cacheMin,
+    trainTimeMinutes: timeEst.trainMin,
+    totalDistillMinutes: timeEst.totalMin,
+    totalDistillCostUsd: Math.round(totalDistillCost * 100) / 100,
+    monthlySavingsUsd: Math.round(monthlySavings),
+    roiPaybackMonths: Math.round(roiPayback * 1000) / 1000,
     temperature: inputs.temperature,
     alpha: inputs.alpha,
   };
@@ -132,10 +198,9 @@ export function compareDistillVsQuant(inputs: CompareInputs): CompareResult {
     gpusNeeded: quantGpus,
     prefillTps: inputs.teacherInt4PrefillTps,
     decodeTps: inputs.teacherInt4DecodeTps,
-    accuracyRetentionPct: 97.0, // NF4 double-quant retains ~97% per literature
+    accuracyRetentionPct: 97.0,
   };
 
-  // Recommend distillation when it saves >20% cost AND retains >80% accuracy
   const shouldDistill =
     distill.costSavingsPct > 20 && distill.accuracyRetentionPct > 80;
 
