@@ -1,0 +1,2 @@
+numpy>=1.24
+cupy-cuda12x>=13.0    # GPU version only — requires NVIDIA GPU + CUDA 12

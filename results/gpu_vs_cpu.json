@@ -1,0 +1,12 @@
+{
+  "total_darts": 10000000000,
+  "cpu": {
+    "darts": 10000000000,
+    "hits": 7854011254,
+    "pi_estimate": 3.1416045016,
+    "error": 1.184801020670534e-05,
+    "seed": 42,
+    "device": "cpu",
+    "elapsed_seconds": 114.7622
+  }
+}
