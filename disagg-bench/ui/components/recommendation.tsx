@@ -134,6 +134,13 @@ export function Recommendation({ architectures }: Props) {
                 label="Budget"
                 value={`$${best.monthlySpend.toLocaleString()}/mo`}
               />
+              {best.paretoScore > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-indigo-900/30 text-indigo-300">
+                  <span className="text-base">{"\u2316"}</span>
+                  <span className="text-zinc-400">Pareto:</span>
+                  <span className="font-medium">{best.paretoScore.toFixed(3)}</span>
+                </div>
+              )}
             </div>
 
             <p className="text-xs text-zinc-500 italic">{best.reason}</p>

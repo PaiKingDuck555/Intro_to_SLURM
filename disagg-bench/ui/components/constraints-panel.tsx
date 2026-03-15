@@ -9,10 +9,9 @@ interface Props {
 }
 
 const GOALS = [
-  { value: "cost" as const, label: "Minimize Cost", icon: "$" },
-  { value: "latency" as const, label: "Minimize Latency", icon: "ms" },
-  { value: "throughput" as const, label: "Max Throughput", icon: "t/s" },
-  { value: "balanced" as const, label: "Balanced", icon: "=" },
+  { value: "cost" as const, label: "Minimize Cost", icon: "$", desc: "Cheapest monthly spend" },
+  { value: "latency" as const, label: "Minimize Latency", icon: "ms", desc: "Fastest time-to-first-token" },
+  { value: "pareto" as const, label: "Pareto Optimal", icon: "\u2316", desc: "Best cost-latency tradeoff" },
 ];
 
 const QUANT_OPTIONS = ["FP16", "INT8", "INT4"];
@@ -80,19 +79,22 @@ export function ConstraintsPanel({ constraints, onChange }: Props) {
         <label className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Optimization Goal
         </label>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3">
           {GOALS.map((g) => (
             <button
               key={g.value}
               onClick={() => update({ goal: g.value })}
-              className={`px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+              className={`px-4 py-3 rounded-lg border text-left transition-all ${
                 constraints.goal === g.value
                   ? "border-indigo-500 bg-indigo-500/15 text-indigo-300"
                   : "border-zinc-700 bg-zinc-800/50 text-zinc-400 hover:border-zinc-500"
               }`}
             >
-              <span className="block text-xs opacity-60 mb-0.5">{g.icon}</span>
-              {g.label}
+              <div className="flex items-center gap-2">
+                <span className="text-base opacity-70">{g.icon}</span>
+                <span className="text-sm font-medium">{g.label}</span>
+              </div>
+              <div className="text-[11px] opacity-60 mt-1">{g.desc}</div>
             </button>
           ))}
         </div>
@@ -117,7 +119,7 @@ export function ConstraintsPanel({ constraints, onChange }: Props) {
         <NumberInput
           label="Concurrent Users"
           value={constraints.concurrentUsers}
-          onChange={(v) => update({ concurrentUsers: v })}
+          onChange={(v) => update({ concurrentUsers: Math.max(1, v) })}
           min={1}
         />
         <NumberInput

@@ -16,7 +16,7 @@ const models = getModelList();
 
 const DEFAULT_CONSTRAINTS: UserConstraints = {
   model: models[0]?.id || "",
-  goal: "cost",
+  goal: "pareto",
   maxLatencyMs: 200,
   maxMonthlyBudget: 50000,
   concurrentUsers: 100,

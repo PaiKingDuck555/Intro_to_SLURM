@@ -3,7 +3,7 @@ import { getBenchmarksForModel, type BenchmarkEntry } from "./benchmark-data";
 
 export interface UserConstraints {
   model: string;
-  goal: "cost" | "latency" | "throughput" | "balanced";
+  goal: "cost" | "latency" | "pareto";
   maxLatencyMs: number;
   maxMonthlyBudget: number;
   concurrentUsers: number;
@@ -48,9 +48,22 @@ export interface Architecture {
   meetsBudget: boolean;
   meetsAll: boolean;
 
+  paretoScore: number;
   reason: string;
 }
 
+/*──────────────────────────────────────────────────────────────
+  ESTIMATION — scale B200 benchmark numbers to other GPUs
+  
+  Prefill is compute-bound  → scale by FLOPS ratio
+  Decode  is bandwidth-bound → scale by memory bandwidth ratio
+
+    prefill_tps_target = prefill_tps_b200 × (target_flops / b200_flops)
+    decode_tps_target  = decode_tps_b200  × (target_bw    / b200_bw)
+
+  VRAM fit check: model must use ≤ 85% of GPU VRAM (leave
+  headroom for KV cache and framework overhead).
+──────────────────────────────────────────────────────────────*/
 function estimateOnGpu(
   bench: BenchmarkEntry,
   targetGpuId: string
@@ -59,9 +72,8 @@ function estimateOnGpu(
   if (!gpu) throw new Error(`Unknown GPU: ${targetGpuId}`);
 
   const b200 = GPU_CATALOG["B200"];
-  const benchIsB200 = bench.gpu.includes("B200");
 
-  if (benchIsB200 && targetGpuId === "B200") {
+  if (bench.gpu.includes("B200") && targetGpuId === "B200") {
     return {
       gpuId: targetGpuId,
       gpuName: gpu.name,
@@ -74,14 +86,8 @@ function estimateOnGpu(
     };
   }
 
-  const baseFlops = benchIsB200
-    ? b200.flops_fp16_tflops
-    : b200.flops_fp16_tflops;
-  const baseBw = benchIsB200 ? b200.bandwidth_tb_s : b200.bandwidth_tb_s;
-
-  const flopsRatio = gpu.flops_fp16_tflops / baseFlops;
-  const bwRatio = gpu.bandwidth_tb_s / baseBw;
-
+  const flopsRatio = gpu.flops_fp16_tflops / b200.flops_fp16_tflops;
+  const bwRatio = gpu.bandwidth_tb_s / b200.bandwidth_tb_s;
   const fits = bench.model_gb <= gpu.vram_gb * 0.85;
 
   return {
@@ -96,12 +102,65 @@ function estimateOnGpu(
   };
 }
 
+/*──────────────────────────────────────────────────────────────
+  COST PER 1K TOKENS
+  
+    cost_per_1k = (price_per_hour / 3600 / tps) × 1000
+    
+  i.e. how much it costs to process 1000 tokens at the given
+  throughput rate, paying the given hourly GPU price.
+──────────────────────────────────────────────────────────────*/
 function costPer1k(pricePerHour: number, tps: number): number {
   if (tps <= 0) return Infinity;
   return (pricePerHour / 3600 / tps) * 1000;
 }
 
+/*──────────────────────────────────────────────────────────────
+  MAIN OPTIMIZER
+  
+  For each (quant × prefillGpu × decodeGpu) combination:
+
+  1. PREFILL LATENCY (time to first token):
+     prefill_ms = (prompt_tokens / prefill_tps) × 1000
+
+  2. PREFILL GPU COUNT (to meet latency target):
+     if prefill_ms > maxLatency → need multiple GPUs to
+     shard the prompt across them in parallel:
+       prefill_gpu_count = ⌈ prefill_ms / maxLatency ⌉
+       effective_latency = prefill_ms / prefill_gpu_count
+
+  3. DECODE GPU COUNT (to serve concurrent users):
+     Each user generates ~1 token/step, so N concurrent users
+     need N tokens/sec total decode bandwidth:
+       decode_gpu_count = ⌈ concurrent_users / decode_tps ⌉
+
+  4. TOTAL LATENCY (full request):
+     total_ms = effective_prefill_ms
+              + (avg_output_tokens / (decode_tps × decode_gpu_count)) × 1000
+
+  5. HOURLY / MONTHLY COST:
+     hourly  = prefill_gpus × prefill_price + decode_gpus × decode_price
+     monthly = hourly × 720  (24h × 30d)
+
+  6. CONSTRAINT CHECKS:
+     meetsLatency = effective_prefill_ms ≤ maxLatencyMs
+     meetsBudget  = monthlySpend ≤ maxMonthlyBudget
+
+  7. SORTING:
+     - "cost"    → sort by monthlySpend ↑
+     - "latency" → sort by prefillLatencyMs ↑
+     - "pareto"  → sort by normalized distance from origin:
+         cost_norm    = (cost - min_cost) / (max_cost - min_cost)
+         latency_norm = (lat  - min_lat)  / (max_lat  - min_lat)
+         d = √(cost_norm² + latency_norm²)
+       This finds the "knee" of the Pareto frontier — the
+       architecture closest to ideal (0 cost, 0 latency).
+──────────────────────────────────────────────────────────────*/
 export function optimize(constraints: UserConstraints): Architecture[] {
+  const safeUsers = Math.max(1, constraints.concurrentUsers);
+  const safePrompt = Math.max(1, constraints.avgPromptTokens);
+  const safeOutput = Math.max(1, constraints.avgOutputTokens);
+
   const architectures: Architecture[] = [];
 
   for (const quant of constraints.allowedQuant) {
@@ -110,7 +169,6 @@ export function optimize(constraints: UserConstraints): Architecture[] {
     const benchmarks = getBenchmarksForModel(constraints.model, quantKey);
     if (benchmarks.length === 0) continue;
 
-    // Pick best prefill and best decode benchmarks
     const bestPrefill = benchmarks.reduce((a, b) =>
       a.prefill_tps > b.prefill_tps ? a : b
     );
@@ -125,45 +183,36 @@ export function optimize(constraints: UserConstraints): Architecture[] {
 
         if (!pEst.fitsInVram || !dEst.fitsInVram) continue;
 
-        // Prefill latency: time to process prompt
-        const prefillLatencyMs =
-          (constraints.avgPromptTokens / pEst.prefillTps) * 1000;
+        // ── Step 1: Prefill latency ──
+        const rawPrefillMs = (safePrompt / pEst.prefillTps) * 1000;
 
-        // How many prefill GPUs to meet latency target?
+        // ── Step 2: Prefill GPU count ──
         let prefillGpuCount = 1;
-        if (prefillLatencyMs > constraints.maxLatencyMs) {
-          prefillGpuCount = Math.ceil(
-            prefillLatencyMs / constraints.maxLatencyMs
-          );
+        if (rawPrefillMs > constraints.maxLatencyMs) {
+          prefillGpuCount = Math.ceil(rawPrefillMs / constraints.maxLatencyMs);
         }
+        const effectivePrefillMs = rawPrefillMs / prefillGpuCount;
 
-        // Decode: each GPU can serve dEst.decodeTps total tokens/s
-        const effectivePrefillLatency = prefillLatencyMs / prefillGpuCount;
-
-        // Decode latency per token
-        const decodeLatencyMsPerToken = dEst.decodeTps > 0
-          ? (1 / dEst.decodeTps) * 1000 * Math.max(1, constraints.concurrentUsers)
-          : Infinity;
-
-        // How many decode GPUs to serve concurrent users?
-        const tokensPerSecNeeded = constraints.concurrentUsers;
-        let decodeGpuCount = Math.max(
+        // ── Step 3: Decode GPU count ──
+        const decodeGpuCount = Math.max(
           1,
-          Math.ceil(tokensPerSecNeeded / dEst.decodeTps)
+          Math.ceil(safeUsers / dEst.decodeTps)
         );
 
+        // ── Step 4: Total latency ──
         const totalLatencyMs =
-          effectivePrefillLatency +
-          (constraints.avgOutputTokens / (dEst.decodeTps * decodeGpuCount)) * 1000;
+          effectivePrefillMs +
+          (safeOutput / (dEst.decodeTps * decodeGpuCount)) * 1000;
 
+        // ── Step 5: Cost ──
         const disaggregated = prefillGpuId !== decodeGpuId || quant !== "FP16";
-
         const hourlySpend =
           prefillGpuCount * pEst.pricePerHour +
           decodeGpuCount * dEst.pricePerHour;
         const monthlySpend = hourlySpend * 720;
 
-        const meetsLatency = effectivePrefillLatency <= constraints.maxLatencyMs;
+        // ── Step 6: Constraint checks ──
+        const meetsLatency = effectivePrefillMs <= constraints.maxLatencyMs;
         const meetsBudget = monthlySpend <= constraints.maxMonthlyBudget;
 
         let reason = "";
@@ -187,8 +236,9 @@ export function optimize(constraints: UserConstraints): Architecture[] {
           prefillGpuCount,
           decodeGpuCount,
           disaggregated,
-          prefillLatencyMs: effectivePrefillLatency,
-          decodeLatencyMsPerToken: dEst.decodeTps > 0 ? (1 / dEst.decodeTps) * 1000 : Infinity,
+          prefillLatencyMs: effectivePrefillMs,
+          decodeLatencyMsPerToken:
+            dEst.decodeTps > 0 ? (1 / dEst.decodeTps) * 1000 : Infinity,
           totalLatencyMs,
           totalThroughputTps: dEst.decodeTps * decodeGpuCount,
           hourlySpend,
@@ -198,13 +248,31 @@ export function optimize(constraints: UserConstraints): Architecture[] {
           meetsLatency,
           meetsBudget,
           meetsAll: meetsLatency && meetsBudget,
+          paretoScore: 0,
           reason,
         });
       }
     }
   }
 
-  // Sort by optimization goal
+  // ── Step 7: Compute Pareto scores ──
+  if (architectures.length > 0) {
+    const minCost = Math.min(...architectures.map((a) => a.monthlySpend));
+    const maxCost = Math.max(...architectures.map((a) => a.monthlySpend));
+    const minLat = Math.min(...architectures.map((a) => a.prefillLatencyMs));
+    const maxLat = Math.max(...architectures.map((a) => a.prefillLatencyMs));
+
+    const costRange = maxCost - minCost || 1;
+    const latRange = maxLat - minLat || 1;
+
+    for (const arch of architectures) {
+      const cNorm = (arch.monthlySpend - minCost) / costRange;
+      const lNorm = (arch.prefillLatencyMs - minLat) / latRange;
+      arch.paretoScore = Math.sqrt(cNorm * cNorm + lNorm * lNorm);
+    }
+  }
+
+  // ── Sorting ──
   const sortFn = {
     cost: (a: Architecture, b: Architecture) => {
       if (a.meetsAll !== b.meetsAll) return a.meetsAll ? -1 : 1;
@@ -214,21 +282,9 @@ export function optimize(constraints: UserConstraints): Architecture[] {
       if (a.meetsAll !== b.meetsAll) return a.meetsAll ? -1 : 1;
       return a.prefillLatencyMs - b.prefillLatencyMs;
     },
-    throughput: (a: Architecture, b: Architecture) => {
+    pareto: (a: Architecture, b: Architecture) => {
       if (a.meetsAll !== b.meetsAll) return a.meetsAll ? -1 : 1;
-      return b.totalThroughputTps - a.totalThroughputTps;
-    },
-    balanced: (a: Architecture, b: Architecture) => {
-      if (a.meetsAll !== b.meetsAll) return a.meetsAll ? -1 : 1;
-      const scoreA =
-        a.monthlySpend / 10000 +
-        a.prefillLatencyMs / 500 -
-        a.totalThroughputTps / 5000;
-      const scoreB =
-        b.monthlySpend / 10000 +
-        b.prefillLatencyMs / 500 -
-        b.totalThroughputTps / 5000;
-      return scoreA - scoreB;
+      return a.paretoScore - b.paretoScore;
     },
   };
 
@@ -262,11 +318,9 @@ export function estimateFineTune(
   contextLength: number,
   maxBudget: number
 ): FineTuneEstimate {
-  // VRAM requirement estimation
   const vramMultiplier = { full: 4.0, lora: 1.5, qlora: 0.6 };
   const vramRequired = modelSizeGb * vramMultiplier[method];
 
-  // Find cheapest GPU that fits
   const candidates = GPU_LIST.filter(
     (g) => g.vram_gb * 0.9 >= vramRequired
   ).sort((a, b) => a.price_per_hour - b.price_per_hour);
@@ -278,7 +332,6 @@ export function estimateFineTune(
     gpu = candidates[0];
     gpuCount = 1;
   } else {
-    // Need multi-GPU — use cheapest large GPU
     gpu =
       GPU_LIST.filter((g) => g.vram_gb >= 80).sort(
         (a, b) => a.price_per_hour - b.price_per_hour
@@ -286,8 +339,6 @@ export function estimateFineTune(
     gpuCount = Math.ceil(vramRequired / (gpu.vram_gb * 0.85));
   }
 
-  // Training speed estimation (tokens/sec)
-  // Rough: ~1000 tokens/sec/B100-equivalent for LoRA, ~300 for full finetune
   const baseSpeed = { full: 300, lora: 1000, qlora: 800 };
   const gpuSpeedFactor =
     gpu.flops_fp16_tflops / GPU_CATALOG["B200"].flops_fp16_tflops;
@@ -299,7 +350,6 @@ export function estimateFineTune(
   const estimatedHours = estimatedSeconds / 3600;
   const estimatedCost = estimatedHours * gpu.price_per_hour * gpuCount;
 
-  // Checkpoint size
   const checkpointMultiplier = { full: 1.0, lora: 0.05, qlora: 0.03 };
   const checkpointSizeGb = modelSizeGb * checkpointMultiplier[method];
 
