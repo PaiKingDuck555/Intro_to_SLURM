@@ -1,22 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
-import * as fs from "fs";
-import * as path from "path";
+import { Client } from "ssh2";
 
-const execAsync = promisify(exec);
+const SSH_HOST = process.env.BENCHMARK_SSH_HOST || "35.84.33.219";
+const SSH_USER = process.env.BENCHMARK_SSH_USER || "user04";
+const SSH_PRIVATE_KEY = process.env.BENCHMARK_SSH_KEY || "";
 
-const SSH_HOST = process.env.BENCHMARK_SSH_HOST || "user04@35.84.33.219";
-const SSH_KEY = process.env.BENCHMARK_SSH_KEY || "~/.ssh/id_ed25519";
-const RESULTS_DIR = process.env.BENCHMARK_RESULTS_DIR ||
-  path.join(process.cwd(), "..", "results");
+function sshExec(cmd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!SSH_PRIVATE_KEY) {
+      return reject(new Error("BENCHMARK_SSH_KEY environment variable not set"));
+    }
 
-async function sshCommand(cmd: string): Promise<string> {
-  const { stdout } = await execAsync(
-    `ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${SSH_HOST} "${cmd}"`,
-    { timeout: 30000 }
-  );
-  return stdout.trim();
+    const conn = new Client();
+    let output = "";
+    let errorOutput = "";
+
+    conn.on("ready", () => {
+      conn.exec(cmd, (err, stream) => {
+        if (err) {
+          conn.end();
+          return reject(err);
+        }
+
+        stream.on("data", (data: Buffer) => {
+          output += data.toString();
+        });
+
+        stream.stderr.on("data", (data: Buffer) => {
+          errorOutput += data.toString();
+        });
+
+        stream.on("close", (code: number) => {
+          conn.end();
+          if (code !== 0 && !output.trim()) {
+            reject(new Error(errorOutput || `Command exited with code ${code}`));
+          } else {
+            resolve(output.trim());
+          }
+        });
+      });
+    });
+
+    conn.on("error", (err) => {
+      reject(new Error(`SSH connection failed: ${err.message}`));
+    });
+
+    conn.connect({
+      host: SSH_HOST,
+      port: 22,
+      username: SSH_USER,
+      privateKey: SSH_PRIVATE_KEY,
+      readyTimeout: 15000,
+    });
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -28,39 +64,74 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "model is required" }, { status: 400 });
     }
 
-    // Submit a quick single-config benchmark via SSH
-    const slurmScript = [
-      "#!/bin/bash",
-      `export PATH=$HOME/.local/bin:$PATH`,
-      `python3 ~/disagg-bench/cluster/benchmark_inference.py \\`,
-      `  --model "${model}" \\`,
-      `  --batch-size ${batch_size} \\`,
-      `  --seq-length ${seq_length} \\`,
-      `  --decode-tokens ${decode_tokens} \\`,
-      `  --dtype float16 \\`,
-      `  --output-dir ~/disagg-bench/results`,
-    ].join("\n");
-
-    // Write temp script and submit
-    const scriptName = `bench_quick_${Date.now()}.sh`;
-    await sshCommand(`cat > /tmp/${scriptName} << 'SCRIPT'\n${slurmScript}\nSCRIPT`);
-
-    const submitOutput = await sshCommand(
-      `cd ~/disagg-bench && sbatch --job-name=quick_bench --output=logs/quick_%j.out ` +
-      `--error=logs/quick_%j.err --ntasks=1 --cpus-per-task=4 --mem=64G ` +
-      `--gres=gpu:1 --time=00:30:00 --partition=priority /tmp/${scriptName}`
-    );
-
-    const jobMatch = submitOutput.match(/Submitted batch job (\d+)/);
-    if (!jobMatch) {
+    if (!SSH_PRIVATE_KEY) {
       return NextResponse.json(
-        { error: "Failed to submit job", output: submitOutput },
-        { status: 500 }
+        { error: "SSH key not configured. Set BENCHMARK_SSH_KEY in Vercel environment variables." },
+        { status: 503 }
       );
     }
 
-    const jobId = jobMatch[1];
-    return NextResponse.json({ status: "submitted", jobId });
+    const benchCmd = [
+      "export PATH=$HOME/.local/bin:$PATH &&",
+      "python3 ~/disagg-bench/cluster/benchmark_inference.py",
+      `--model "${model}"`,
+      `--batch-size ${batch_size}`,
+      `--seq-length ${seq_length}`,
+      `--decode-tokens ${decode_tokens}`,
+      "--dtype float16",
+      "--output-dir ~/disagg-bench/results",
+    ].join(" ");
+
+    // For quick benchmarks, run directly (not via SLURM) to get immediate results
+    const output = await sshExec(benchCmd);
+
+    // Parse the JSON result file — benchmark_inference.py prints the path
+    const pathMatch = output.match(/Results saved to: (.+\.json)/);
+    if (pathMatch) {
+      const resultJson = await sshExec(`cat ${pathMatch[1]}`);
+      const result = JSON.parse(resultJson);
+
+      return NextResponse.json({
+        status: "complete",
+        result: {
+          prefill_tps: result.prefill_tokens_per_sec,
+          decode_tps: result.decode_tokens_per_sec,
+          model_gb: result.model_size_gb,
+          vram_prefill: result.vram_used_prefill_gb,
+          vram_decode: result.vram_used_decode_gb,
+          prefill_ms: result.prefill_time_ms,
+          decode_ms_per_tok: result.decode_time_per_token_ms,
+        },
+      });
+    }
+
+    // If no path match, try to find the most recent result
+    const latestFile = await sshExec(
+      `ls -t ~/disagg-bench/results/bench_*.json 2>/dev/null | head -1`
+    );
+
+    if (latestFile) {
+      const resultJson = await sshExec(`cat ${latestFile}`);
+      const result = JSON.parse(resultJson);
+
+      return NextResponse.json({
+        status: "complete",
+        result: {
+          prefill_tps: result.prefill_tokens_per_sec,
+          decode_tps: result.decode_tokens_per_sec,
+          model_gb: result.model_size_gb,
+          vram_prefill: result.vram_used_prefill_gb,
+          vram_decode: result.vram_used_decode_gb,
+          prefill_ms: result.prefill_time_ms,
+          decode_ms_per_tok: result.decode_time_per_token_ms,
+        },
+      });
+    }
+
+    return NextResponse.json({
+      status: "complete",
+      raw_output: output,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -74,15 +145,15 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Check if job is still running
-    const squeueOut = await sshCommand(`squeue -j ${jobId} --noheader 2>/dev/null || true`);
+    const squeueOut = await sshExec(
+      `squeue -j ${jobId} --noheader 2>/dev/null || true`
+    );
 
     if (squeueOut.trim().length > 0) {
       return NextResponse.json({ status: "running", jobId });
     }
 
-    // Job finished — find the result file
-    const resultFiles = await sshCommand(
+    const resultFiles = await sshExec(
       `ls -t ~/disagg-bench/results/bench_*.json 2>/dev/null | head -1`
     );
 
@@ -90,7 +161,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ status: "failed", error: "No result file found" });
     }
 
-    const resultJson = await sshCommand(`cat ${resultFiles}`);
+    const resultJson = await sshExec(`cat ${resultFiles}`);
     const result = JSON.parse(resultJson);
 
     return NextResponse.json({
