@@ -6,15 +6,39 @@
  * where k ≈ 0.08 fits DistilBERT and TinyBERT benchmarks.
  */
 
+import { GPU_CATALOG, GPU_LIST, type GpuSpec } from "./gpu-catalog";
+
 const DISTILL_K = 0.08;
-const B200_PRICE = 45.0;
 const AVG_TOKENS_PER_SAMPLE = 256;
+
+/**
+ * Find the cheapest GPU that fits a model in VRAM (with 15% headroom for KV cache).
+ * This is critical: a 1.3B model (2.6 GB) should use an L40S ($4/hr),
+ * not a B200 ($45/hr).
+ */
+export function cheapestGpuForModel(modelSizeGb: number): GpuSpec {
+  const candidates = GPU_LIST
+    .filter((g) => g.vram_gb * 0.85 >= modelSizeGb)
+    .sort((a, b) => a.price_per_hour - b.price_per_hour);
+
+  return candidates[0] || GPU_LIST[0];
+}
+
+/**
+ * Scale decode throughput from B200 benchmark to a target GPU
+ * using memory bandwidth ratio (decode is bandwidth-bound).
+ */
+export function scaleDecodeTps(benchTps: number, targetGpu: GpuSpec): number {
+  const b200 = GPU_CATALOG["B200"];
+  const bwRatio = targetGpu.bandwidth_tb_s / b200.bandwidth_tb_s;
+  return Math.round(benchTps * bwRatio);
+}
 
 export interface DistillationInputs {
   teacherParams: number;
   studentParams: number;
-  teacherPricePerHour: number;
-  studentPricePerHour: number;
+  teacherModelGb: number;
+  studentModelGb: number;
   teacherPrefillTps: number;
   teacherDecodeTps: number;
   studentPrefillTps: number;
@@ -28,6 +52,10 @@ export interface DistillationInputs {
 export interface DistillationPlan {
   accuracyRetentionPct: number;
   compressionRatio: number;
+  teacherGpuName: string;
+  studentGpuName: string;
+  teacherGpuPrice: number;
+  studentGpuPrice: number;
   teacherGpusNeeded: number;
   studentGpusNeeded: number;
   teacherCostPerHour: number;
@@ -61,7 +89,7 @@ export interface CompareResult {
 }
 
 export interface CompareInputs extends DistillationInputs {
-  teacherInt4PricePerHour: number;
+  teacherInt4ModelGb: number;
   teacherInt4PrefillTps: number;
   teacherInt4DecodeTps: number;
 }
@@ -141,11 +169,19 @@ export function estimateDistillationPlan(
   );
   const compressionRatio = inputs.teacherParams / inputs.studentParams;
 
-  const teacherGpus = gpusNeeded(inputs.teacherDecodeTps, inputs.concurrentUsers);
-  const studentGpus = gpusNeeded(inputs.studentDecodeTps, inputs.concurrentUsers);
+  // Find cheapest GPU that fits each model
+  const teacherGpu = cheapestGpuForModel(inputs.teacherModelGb);
+  const studentGpu = cheapestGpuForModel(inputs.studentModelGb);
 
-  const teacherCostPerHour = teacherGpus * inputs.teacherPricePerHour;
-  const studentCostPerHour = studentGpus * inputs.studentPricePerHour;
+  // Scale decode throughput from B200 benchmarks to the target GPU
+  const teacherDecodeTpsScaled = scaleDecodeTps(inputs.teacherDecodeTps, teacherGpu);
+  const studentDecodeTpsScaled = scaleDecodeTps(inputs.studentDecodeTps, studentGpu);
+
+  const teacherGpuCount = gpusNeeded(teacherDecodeTpsScaled, inputs.concurrentUsers);
+  const studentGpuCount = gpusNeeded(studentDecodeTpsScaled, inputs.concurrentUsers);
+
+  const teacherCostPerHour = teacherGpuCount * teacherGpu.price_per_hour;
+  const studentCostPerHour = studentGpuCount * studentGpu.price_per_hour;
   const teacherMonthlyCost = teacherCostPerHour * 720;
   const studentMonthlyCost = studentCostPerHour * 720;
   const costSavingsPct =
@@ -159,9 +195,11 @@ export function estimateDistillationPlan(
     "lora"
   );
 
+  // Distillation runs on B200 (our cluster GPU)
+  const b200Price = GPU_CATALOG["B200"].price_per_hour;
   const totalDistillCost =
-    (timeEst.cacheMin / 60) * inputs.teacherPricePerHour +
-    (timeEst.trainMin / 60) * inputs.studentPricePerHour;
+    (timeEst.cacheMin / 60) * b200Price +
+    (timeEst.trainMin / 60) * b200Price;
 
   const monthlySavings = teacherMonthlyCost - studentMonthlyCost;
   const roiPayback = monthlySavings > 0 ? totalDistillCost / monthlySavings : Infinity;
@@ -169,8 +207,12 @@ export function estimateDistillationPlan(
   return {
     accuracyRetentionPct: Math.round(retention * 1000) / 10,
     compressionRatio: Math.round(compressionRatio * 10) / 10,
-    teacherGpusNeeded: teacherGpus,
-    studentGpusNeeded: studentGpus,
+    teacherGpuName: teacherGpu.name.replace("NVIDIA ", ""),
+    studentGpuName: studentGpu.name.replace("NVIDIA ", ""),
+    teacherGpuPrice: teacherGpu.price_per_hour,
+    studentGpuPrice: studentGpu.price_per_hour,
+    teacherGpusNeeded: teacherGpuCount,
+    studentGpusNeeded: studentGpuCount,
     teacherCostPerHour,
     studentCostPerHour,
     teacherMonthlyCost: Math.round(teacherMonthlyCost),
@@ -192,9 +234,11 @@ export function estimateDistillationPlan(
 export function compareDistillVsQuant(inputs: CompareInputs): CompareResult {
   const distill = estimateDistillationPlan(inputs);
 
-  const quantGpus = gpusNeeded(inputs.teacherInt4DecodeTps, inputs.concurrentUsers);
+  const quantGpu = cheapestGpuForModel(inputs.teacherInt4ModelGb);
+  const quantDecodeTpsScaled = scaleDecodeTps(inputs.teacherInt4DecodeTps, quantGpu);
+  const quantGpus = gpusNeeded(quantDecodeTpsScaled, inputs.concurrentUsers);
   const quantized = {
-    pricePerHour: quantGpus * inputs.teacherInt4PricePerHour,
+    pricePerHour: quantGpus * quantGpu.price_per_hour,
     gpusNeeded: quantGpus,
     prefillTps: inputs.teacherInt4PrefillTps,
     decodeTps: inputs.teacherInt4DecodeTps,

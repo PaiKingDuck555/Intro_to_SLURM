@@ -31,8 +31,8 @@ describe("estimateDistillationPlan", () => {
   const base = {
     teacherParams: 30,
     studentParams: 1.3,
-    teacherPricePerHour: 45.0,
-    studentPricePerHour: 45.0,
+    teacherModelGb: 55.8,
+    studentModelGb: 2.6,
     teacherPrefillTps: 6756,
     teacherDecodeTps: 60,
     studentPrefillTps: 15823,
@@ -59,10 +59,15 @@ describe("estimateDistillationPlan", () => {
     expect(plan.costSavingsPct).toBeGreaterThan(0);
   });
 
+  it("assigns cheaper GPU to smaller student model", () => {
+    const plan = estimateDistillationPlan(base);
+    expect(plan.studentGpuPrice).toBeLessThan(plan.teacherGpuPrice);
+  });
+
   it("pipeline durations are positive", () => {
     const plan = estimateDistillationPlan(base);
-    expect(plan.cacheJobDurationEstimateHrs).toBeGreaterThan(0);
-    expect(plan.trainJobDurationEstimateHrs).toBeGreaterThan(0);
+    expect(plan.cacheTimeMinutes).toBeGreaterThan(0);
+    expect(plan.trainTimeMinutes).toBeGreaterThan(0);
   });
 });
 
@@ -70,9 +75,9 @@ describe("compareDistillVsQuant", () => {
   const base = {
     teacherParams: 30,
     studentParams: 1.3,
-    teacherPricePerHour: 45.0,
-    studentPricePerHour: 45.0,
-    teacherInt4PricePerHour: 45.0,
+    teacherModelGb: 55.8,
+    studentModelGb: 2.6,
+    teacherInt4ModelGb: 16.5,
     teacherPrefillTps: 6756,
     teacherDecodeTps: 60,
     teacherInt4PrefillTps: 8065,

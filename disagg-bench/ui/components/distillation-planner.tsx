@@ -6,12 +6,14 @@ import {
   estimateDistillTime,
   estimateTinkerCost,
   computeROI,
+  cheapestGpuForModel,
   type DistillationPlan,
 } from "@/lib/distillation";
+import { GPU_CATALOG } from "@/lib/gpu-catalog";
 import { getBenchmarksForModel } from "@/lib/benchmark-data";
 import { MODEL_CATALOG, type CatalogModel } from "@/lib/model-catalog";
 
-const GPU_PRICE = 45.0;
+const B200_PRICE = GPU_CATALOG["B200"].price_per_hour;
 
 const DATASETS = [
   {
@@ -123,8 +125,8 @@ export function DistillationPlanner() {
     return estimateDistillationPlan({
       teacherParams: teacher.params_b,
       studentParams: student.params_b,
-      teacherPricePerHour: GPU_PRICE,
-      studentPricePerHour: GPU_PRICE,
+      teacherModelGb: teacher.fp16_gb,
+      studentModelGb: student.fp16_gb,
       teacherPrefillTps,
       teacherDecodeTps,
       studentPrefillTps,
@@ -429,7 +431,7 @@ export function DistillationPlanner() {
                 <div className="flex justify-between border-t border-zinc-800 pt-2">
                   <span className="text-zinc-400 font-medium">Total</span>
                   <span className="text-indigo-300 font-medium">
-                    ~{timeEst.totalMin} min &middot; ${((timeEst.totalMin / 60) * GPU_PRICE).toFixed(0)}
+                    ~{timeEst.totalMin} min &middot; ${((timeEst.totalMin / 60) * B200_PRICE).toFixed(0)}
                   </span>
                 </div>
               </>
@@ -506,6 +508,9 @@ export function DistillationPlanner() {
                     ${estimate.teacherMonthlyCost.toLocaleString()}
                     <span className="text-[10px] text-zinc-500">/mo</span>
                   </div>
+                  <div className="text-[10px] text-zinc-500 mt-1">
+                    {estimate.teacherGpusNeeded}x {estimate.teacherGpuName} @ ${estimate.teacherGpuPrice}/hr
+                  </div>
                   {liveResult && (
                     <div className="text-xs text-zinc-400 mt-1">
                       PPL: {liveResult.teacher_perplexity}
@@ -518,6 +523,9 @@ export function DistillationPlanner() {
                   <div className="text-lg font-bold text-emerald-400 mt-1">
                     ${estimate.studentMonthlyCost.toLocaleString()}
                     <span className="text-[10px] text-zinc-500">/mo</span>
+                  </div>
+                  <div className="text-[10px] text-zinc-500 mt-1">
+                    {estimate.studentGpusNeeded}x {estimate.studentGpuName} @ ${estimate.studentGpuPrice}/hr
                   </div>
                   {liveResult && (
                     <div className="text-xs text-zinc-400 mt-1">
